@@ -1,0 +1,422 @@
+{
+  "group_name": "软件开发项目需求评审群",
+  "group_id": "oc_sim_软件开发项目",
+  "messages": [
+    {
+      "message_id": "om_sim_001",
+      "msg_type": "text",
+      "sender": {
+        "name": "张明(PM)",
+        "id": "ou_pm_001",
+        "id_type": "open_id"
+      },
+      "content": "各位早上好！第一阶段完成需求分析与系统设计，正式启动，请各方注意。",
+      "create_time": "1777219200000",
+      "chat_id": "oc_sim_软件开发项目",
+      "message_position": "1",
+      "update_time": "1777219200000",
+      "deleted": false,
+      "updated": false
+    },
+    {
+      "message_id": "om_sim_002",
+      "msg_type": "text",
+      "sender": {
+        "name": "李强(DEV)",
+        "id": "ou_dev_001",
+        "id_type": "open_id"
+      },
+      "content": "收到，DEV这边准备好了。",
+      "create_time": "1777219260000",
+      "chat_id": "oc_sim_软件开发项目",
+      "message_position": "2",
+      "update_time": "1777219260000",
+      "deleted": false,
+      "updated": false
+    },
+    {
+      "message_id": "om_sim_003",
+      "msg_type": "text",
+      "sender": {
+        "name": "王芳(TEST)",
+        "id": "ou_test_001",
+        "id_type": "open_id"
+      },
+      "content": "TEST收到，了解需求后可以开始编写测试用例。",
+      "create_time": "1777219320000",
+      "chat_id": "oc_sim_软件开发项目",
+      "message_position": "3",
+      "update_time": "1777219320000",
+      "deleted": false,
+      "updated": false
+    },
+    {
+      "message_id": "om_sim_004",
+      "msg_type": "text",
+      "sender": {
+        "name": "刘洋(UI)",
+        "id": "ou_ui_001",
+        "id_type": "open_id"
+      },
+      "content": "UI这边随时待命。",
+      "create_time": "1777219380000",
+      "chat_id": "oc_sim_软件开发项目",
+      "message_position": "4",
+      "update_time": "1777219380000",
+      "deleted": false,
+      "updated": false
+    },
+    {
+      "message_id": "om_sim_005",
+      "msg_type": "text",
+      "sender": {
+        "name": "张明(PM)",
+        "id": "ou_pm_001",
+        "id_type": "open_id"
+      },
+      "content": "目前已完成：完成了用户需求收集、用例分析和系统架构设计。大家看一下有没有遗漏。",
+      "create_time": "1777219440000",
+      "chat_id": "oc_sim_软件开发项目",
+      "message_position": "5",
+      "update_time": "1777219440000",
+      "deleted": false,
+      "updated": false
+    },
+    {
+      "message_id": "om_sim_006",
+      "msg_type": "text",
+      "sender": {
+        "name": "李强(DEV)",
+        "id": "ou_dev_001",
+        "id_type": "open_id"
+      },
+      "content": "系统架构设计这块我们内部评审过了，方案可行。",
+      "create_time": "1777219500000",
+      "chat_id": "oc_sim_软件开发项目",
+      "message_position": "6",
+      "update_time": "1777219500000",
+      "deleted": false,
+      "updated": false
+    },
+    {
+      "message_id": "om_sim_007",
+      "msg_type": "text",
+      "sender": {
+        "name": "王芳(TEST)",
+        "id": "ou_test_001",
+        "id_type": "open_id"
+      },
+      "content": "用例分析覆盖了主要业务流程，测试范围基本确定。",
+      "create_time": "1777219560000",
+      "chat_id": "oc_sim_软件开发项目",
+      "message_position": "7",
+      "update_time": "1777219560000",
+      "deleted": false,
+      "updated": false
+    },
+    {
+      "message_id": "om_sim_008",
+      "msg_type": "text",
+      "sender": {
+        "name": "刘洋(UI)",
+        "id": "ou_ui_001",
+        "id_type": "open_id"
+      },
+      "content": "但是有些交互细节还需要和PM确认。",
+      "create_time": "1777219620000",
+      "chat_id": "oc_sim_软件开发项目",
+      "message_position": "8",
+      "update_time": "1777219620000",
+      "deleted": false,
+      "updated": false
+    },
+    {
+      "message_id": "om_sim_009",
+      "msg_type": "text",
+      "sender": {
+        "name": "张明(PM)",
+        "id": "ou_pm_001",
+        "id_type": "open_id"
+      },
+      "content": "不过过程中确实遇到了问题：部分用户需求不明确、导致设计讨论延迟。",
+      "create_time": "1777219680000",
+      "chat_id": "oc_sim_软件开发项目",
+      "message_position": "9",
+      "update_time": "1777219680000",
+      "deleted": false,
+      "updated": false
+    },
+    {
+      "message_id": "om_sim_010",
+      "msg_type": "text",
+      "sender": {
+        "name": "李强(DEV)",
+        "id": "ou_dev_001",
+        "id_type": "open_id"
+      },
+      "content": "需求不明确确实影响进度，有些设计方案被迫延迟。",
+      "create_time": "1777219740000",
+      "chat_id": "oc_sim_软件开发项目",
+      "message_position": "10",
+      "update_time": "1777219740000",
+      "deleted": false,
+      "updated": false
+    },
+    {
+      "message_id": "om_sim_011",
+      "msg_type": "text",
+      "sender": {
+        "name": "陈总(PMO)",
+        "id": "ou_pmo_001",
+        "id_type": "open_id"
+      },
+      "content": "延迟了多少？Q3能上线吗？",
+      "create_time": "1777219800000",
+      "chat_id": "oc_sim_软件开发项目",
+      "message_position": "11",
+      "update_time": "1777219800000",
+      "deleted": false,
+      "updated": false
+    },
+    {
+      "message_id": "om_sim_012",
+      "msg_type": "text",
+      "sender": {
+        "name": "张明(PM)",
+        "id": "ou_pm_001",
+        "id_type": "open_id"
+      },
+      "content": "目前还在可控范围，我们已经采取了措施。",
+      "create_time": "1777219860000",
+      "chat_id": "oc_sim_软件开发项目",
+      "message_position": "12",
+      "update_time": "1777219860000",
+      "deleted": false,
+      "updated": false
+    },
+    {
+      "message_id": "om_sim_013",
+      "msg_type": "text",
+      "sender": {
+        "name": "张明(PM)",
+        "id": "ou_pm_001",
+        "id_type": "open_id"
+      },
+      "content": "解决方案：安排了两轮用户访谈、明确需求优先级。效果还不错。",
+      "create_time": "1777219920000",
+      "chat_id": "oc_sim_软件开发项目",
+      "message_position": "13",
+      "update_time": "1777219920000",
+      "deleted": false,
+      "updated": false
+    },
+    {
+      "message_id": "om_sim_014",
+      "msg_type": "text",
+      "sender": {
+        "name": "李强(DEV)",
+        "id": "ou_dev_001",
+        "id_type": "open_id"
+      },
+      "content": "两轮访谈确实把优先级理清了，DEV这边可以放手干了。",
+      "create_time": "1777219980000",
+      "chat_id": "oc_sim_软件开发项目",
+      "message_position": "14",
+      "update_time": "1777219980000",
+      "deleted": false,
+      "updated": false
+    },
+    {
+      "message_id": "om_sim_015",
+      "msg_type": "text",
+      "sender": {
+        "name": "王芳(TEST)",
+        "id": "ou_test_001",
+        "id_type": "open_id"
+      },
+      "content": "需求明确后，测试用例编写效率会提高不少。",
+      "create_time": "1777220040000",
+      "chat_id": "oc_sim_软件开发项目",
+      "message_position": "15",
+      "update_time": "1777220040000",
+      "deleted": false,
+      "updated": false
+    },
+    {
+      "message_id": "om_sim_016",
+      "msg_type": "text",
+      "sender": {
+        "name": "刘洋(UI)",
+        "id": "ou_ui_001",
+        "id_type": "open_id"
+      },
+      "content": "对，交互细节确认后，设计稿也能加速。",
+      "create_time": "1777220100000",
+      "chat_id": "oc_sim_软件开发项目",
+      "message_position": "16",
+      "update_time": "1777220100000",
+      "deleted": false,
+      "updated": false
+    },
+    {
+      "message_id": "om_sim_017",
+      "msg_type": "text",
+      "sender": {
+        "name": "陈总(PMO)",
+        "id": "ou_pmo_001",
+        "id_type": "open_id"
+      },
+      "content": "目前进度正常吗？进入下阶段有什么风险？",
+      "create_time": "1777220160000",
+      "chat_id": "oc_sim_软件开发项目",
+      "message_position": "17",
+      "update_time": "1777220160000",
+      "deleted": false,
+      "updated": false
+    },
+    {
+      "message_id": "om_sim_018",
+      "msg_type": "text",
+      "sender": {
+        "name": "张明(PM)",
+        "id": "ou_pm_001",
+        "id_type": "open_id"
+      },
+      "content": "整体可控，进入开发阶段、重点模块优先实现。",
+      "create_time": "1777220220000",
+      "chat_id": "oc_sim_软件开发项目",
+      "message_position": "18",
+      "update_time": "1777220220000",
+      "deleted": false,
+      "updated": false
+    },
+    {
+      "message_id": "om_sim_019",
+      "msg_type": "text",
+      "sender": {
+        "name": "李强(DEV)",
+        "id": "ou_dev_001",
+        "id_type": "open_id"
+      },
+      "content": "DEV评估开发阶段，重点模块优先实现，方案可行。",
+      "create_time": "1777220280000",
+      "chat_id": "oc_sim_软件开发项目",
+      "message_position": "19",
+      "update_time": "1777220280000",
+      "deleted": false,
+      "updated": false
+    },
+    {
+      "message_id": "om_sim_020",
+      "msg_type": "text",
+      "sender": {
+        "name": "王芳(TEST)",
+        "id": "ou_test_001",
+        "id_type": "open_id"
+      },
+      "content": "TEST这边可以提前介入设计评审，尽早发现质量问题。",
+      "create_time": "1777220340000",
+      "chat_id": "oc_sim_软件开发项目",
+      "message_position": "20",
+      "update_time": "1777220340000",
+      "deleted": false,
+      "updated": false
+    },
+    {
+      "message_id": "om_sim_021",
+      "msg_type": "text",
+      "sender": {
+        "name": "陈总(PMO)",
+        "id": "ou_pmo_001",
+        "id_type": "open_id"
+      },
+      "content": "开发阶段人手够吗？要不要加资源？",
+      "create_time": "1777220400000",
+      "chat_id": "oc_sim_软件开发项目",
+      "message_position": "21",
+      "update_time": "1777220400000",
+      "deleted": false,
+      "updated": false
+    },
+    {
+      "message_id": "om_sim_022",
+      "msg_type": "text",
+      "sender": {
+        "name": "李强(DEV)",
+        "id": "ou_dev_001",
+        "id_type": "open_id"
+      },
+      "content": "目前5人团队基本够用，但如果需求继续增加可能需要调整。",
+      "create_time": "1777220460000",
+      "chat_id": "oc_sim_软件开发项目",
+      "message_position": "22",
+      "update_time": "1777220460000",
+      "deleted": false,
+      "updated": false
+    },
+    {
+      "message_id": "om_sim_023",
+      "msg_type": "text",
+      "sender": {
+        "name": "张明(PM)",
+        "id": "ou_pm_001",
+        "id_type": "open_id"
+      },
+      "content": "需求范围已经冻结，不会再扩。",
+      "create_time": "1777220520000",
+      "chat_id": "oc_sim_软件开发项目",
+      "message_position": "23",
+      "update_time": "1777220520000",
+      "deleted": false,
+      "updated": false
+    },
+    {
+      "message_id": "om_sim_024",
+      "msg_type": "text",
+      "sender": {
+        "name": "刘洋(UI)",
+        "id": "ou_ui_001",
+        "id_type": "open_id"
+      },
+      "content": "UI设计这边排期没问题，可以配合开发进度。",
+      "create_time": "1777220580000",
+      "chat_id": "oc_sim_软件开发项目",
+      "message_position": "24",
+      "update_time": "1777220580000",
+      "deleted": false,
+      "updated": false
+    },
+    {
+      "message_id": "om_sim_025",
+      "msg_type": "text",
+      "sender": {
+        "name": "张明(PM)",
+        "id": "ou_pm_001",
+        "id_type": "open_id"
+      },
+      "content": "第一阶段总结：需求分析和设计完成，遇到的问题已解决。",
+      "create_time": "1777220640000",
+      "chat_id": "oc_sim_软件开发项目",
+      "message_position": "25",
+      "update_time": "1777220640000",
+      "deleted": false,
+      "updated": false
+    },
+    {
+      "message_id": "om_sim_026",
+      "msg_type": "text",
+      "sender": {
+        "name": "陈总(PMO)",
+        "id": "ou_pmo_001",
+        "id_type": "open_id"
+      },
+      "content": "好，下一阶段进入开发，重点模块优先。请各方保持沟通。",
+      "create_time": "1777220700000",
+      "chat_id": "oc_sim_软件开发项目",
+      "message_position": "26",
+      "update_time": "1777220700000",
+      "deleted": false,
+      "updated": false
+    }
+  ]
+}
