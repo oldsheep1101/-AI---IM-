@@ -238,7 +238,7 @@ def handle_message(event: lark.im.v1.P2ImMessageReceiveV1) -> None:
         print(f"[Agent 执行完成] {done} 成功, {failed} 失败")
     except Exception as e:
         import traceback
-        print(f"[Agent 执行异常] {e}")
+        print(f"[Agent 执行异常] {type(e).__name__}: {e}")
         traceback.print_exc()
         send_reply(chat_id, f"Agent 执行出错：{e}")
 

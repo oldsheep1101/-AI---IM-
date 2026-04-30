@@ -2,6 +2,7 @@
 Agent 核心模块：任务规划 + 执行调度
 """
 
+import datetime
 import json
 import os
 import re
@@ -86,11 +87,15 @@ class Agent:
 
 | skill       | 描述                     | 参数                    |
 |-------------|--------------------------|-------------------------|
-| RESEARCH    | 读取群聊上下文/历史记录   | query: 搜索关键词       |
+| RESEARCH    | 读取群聊上下文/历史记录   | query: 搜索关键词, date_range: 时间范围（如"今天"、"近3天"、"本周"、"上周"） |
 | DOC         | 创建并编辑飞书云文档      | title: 文档标题, content: 初始内容 |
 | BITABLE     | 创建飞书多维表格（看板）  | title: 表格标题, fields: 字段列表 |
-| PPT         | 创建飞书演示文稿          | title: 标题, slides: 幻灯片内容列表 |
-| REPORT      | 向用户发送文字汇报        | content: 汇报文本        |
+| REPORT      | 向用户发送文字汇报        | content: 汇报文本, need_ppt: 是否需要制作PPT |
+
+【意图识别规则】
+- 用户只说"整理成文档"、"生成文档"、"写成文档" → REPORT 的 need_ppt=false，不联系 OpenCLAW
+- 用户说"做成 PPT"、"生成 PPT"、"做汇报"、"汇报 PPT" → REPORT 的 need_ppt=true，需要联系 OpenCLAW 制作
+- 如果不确定，就默认 need_ppt=false（不制作 PPT）
 
 【输出格式强制要求】
 当你收到用户需求时，你必须：
@@ -104,7 +109,7 @@ class Agent:
 ]
 
 【规则】
-- type 必须是 TaskType 中的值（RESEARCH/DOC/BITABLE/PPT/REPORT）
+- type 必须是 TaskType 中的值（RESEARCH/DOC/BITABLE/REPORT）
 - step 从 1 开始，按顺序执行
 - desc 用简短中文描述这个步骤在干啥
 - 如果用户需求只需要 1 个步骤，也必须输出数组（如只需汇报）
@@ -112,11 +117,27 @@ class Agent:
 
 【示例】
 用户说："把刚才讨论的极光项目整理成文档发给我"
-输出：
+输出（不需要 PPT）：
 [
-  {"step": 1, "type": "RESEARCH", "action": "research", "desc": "抓取群聊中关于极光项目的讨论", "params": {"query": "极光项目"}},
+  {"step": 1, "type": "RESEARCH", "action": "research", "desc": "抓取群聊中关于极光项目的讨论", "params": {"query": "极光项目", "date_range": ""}},
   {"step": 2, "type": "DOC", "action": "create_doc", "desc": "生成极光项目方案文档", "params": {"title": "极光项目方案V1", "content": ""}},
-  {"step": 3, "type": "REPORT", "action": "report", "desc": "向用户发送完成汇报", "params": {"content": "文档已生成：xxx"}}
+  {"step": 3, "type": "REPORT", "action": "report", "desc": "向用户发送完成汇报", "params": {"content": "文档已生成：xxx", "need_ppt": false}}
+]
+
+用户说："把这一周的项目讨论整理成文档发给我"
+输出（本周记录，不需要 PPT）：
+[
+  {"step": 1, "type": "RESEARCH", "action": "research", "desc": "抓取本周群聊中关于项目的讨论", "params": {"query": "项目", "date_range": "本周"}},
+  {"step": 2, "type": "DOC", "action": "create_doc", "desc": "生成项目周报文档", "params": {"title": "项目周报", "content": ""}},
+  {"step": 3, "type": "REPORT", "action": "report", "desc": "向用户发送完成汇报", "params": {"content": "文档已生成：xxx", "need_ppt": false}}
+]
+
+用户说："把这一天的聊天记录做成 PPT 发给我"
+输出（今天记录，需要 PPT）：
+[
+  {"step": 1, "type": "RESEARCH", "action": "research", "desc": "抓取今天群聊讨论", "params": {"query": "", "date_range": "今天"}},
+  {"step": 2, "type": "DOC", "action": "create_doc", "desc": "生成今日讨论文档", "params": {"title": "今日讨论总结", "content": ""}},
+  {"step": 3, "type": "REPORT", "action": "report", "desc": "向用户发送完成汇报", "params": {"content": "文档已生成：xxx", "need_ppt": true}}
 ]
 """
 
@@ -273,22 +294,56 @@ class Agent:
         return start_ts, end_ts
 
     def _do_research(self, task: Task) -> str:
-        """读取本地聊天记录文件，用 LLM 总结"""
+        """读取本地聊天记录文件，按时间筛选后用 LLM 总结"""
+        import tempfile
+        with open("/tmp/debug_start.txt", "w") as f:
+            f.write(f"_do_research called, params={task.params}\n")
+
         msg_file = "/Users/phoenix_oldsheep/feishu_messages/messages.txt"
-        print(f"[RESEARCH] 读取文件: {msg_file}")
+        query = task.params.get("query", "")
+        date_range = task.params.get("date_range", "")  # 如"今天"、"近3天"、"本周"
+
+        # 解析时间范围
+        start_ts, end_ts = self._parse_relative_date(date_range)
+        print(f"[RESEARCH] 读取文件: {msg_file}, date_range={date_range}, start={start_ts}, end={end_ts}")
+        with open("/tmp/debug_before_open.txt", "w") as f:
+            f.write(f"start_ts={start_ts}, end_ts={end_ts}\n")
 
         try:
             with open(msg_file, "r", encoding="utf-8") as f:
-                raw_content = f.read().strip()
+                lines = f.readlines()
+            print(f"[RESEARCH] 文件读取成功，共 {len(lines)} 行")
         except FileNotFoundError:
             return f"未找到聊天记录文件：{msg_file}"
         except Exception as e:
             return f"读取文件失败: {e}"
 
-        if not raw_content:
-            return "聊天记录文件为空"
+        # 按时间筛选
+        filtered_lines = []
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            # 格式: [2026-04-27 18:58:12] [chat_id] sender_id: message
+            m = re.match(r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]", line)
+            if m:
+                ts_str = m.group(1)
+                try:
+                    dt = datetime.datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
+                    line_ts = int(dt.timestamp() * 1000)
+                    if start_ts and line_ts < start_ts:
+                        continue
+                    if end_ts and line_ts > end_ts:
+                        continue
+                except ValueError:
+                    pass
+            filtered_lines.append(line)
 
-        print(f"[RESEARCH] 读取到 {len(raw_content)} 字符，开始 LLM 总结...")
+        raw_content = "\n".join(filtered_lines)
+        if not raw_content:
+            return "在指定时间范围内未找到聊天记录"
+
+        print(f"[RESEARCH] 筛选后 {len(filtered_lines)} 条消息，字符数: {len(raw_content)}，开始 LLM 总结...")
 
         # 用 MiniMax LLM 总结
         SYSTEM_PROMPT = """你是一个专业的飞书文档助手。请将下面的群聊记录整理成一份适合写入飞书云文档的纯文本总结。
@@ -312,6 +367,9 @@ class Agent:
 [H2]二、已达成的结论
 结论1
 结论2"""
+
+        print(f"[RESEARCH] raw_content 前100字: {repr(raw_content[:100])}")
+        print(f"[RESEARCH] 准备调用 MiniMax API...")
         try:
             response = _get_minimax_client().chat.completions.create(
                 model="MiniMax-M2.7",
@@ -321,10 +379,19 @@ class Agent:
                 ],
                 max_tokens=4000,
             )
+            print(f"[RESEARCH] API 调用成功")
             summary = response.choices[0].message.content
         except Exception as e:
             import traceback
+            import sys
+            print(f"[RESEARCH] 调用异常: {type(e).__name__}: {e}")
+            sys.stdout.flush()
             traceback.print_exc()
+            sys.stdout.flush()
+            with open("/tmp/debug_research.txt", "w") as f:
+                f.write(raw_content)
+            print(f"[RESEARCH] raw_content 已写入 /tmp/debug_research.txt ({len(raw_content)} 字)")
+            sys.stdout.flush()
             return f"LLM 总结失败: {e}"
 
         print(f"[RESEARCH] 总结完成，长度: {len(summary)} 字符")
@@ -479,8 +546,9 @@ class Agent:
             if resp.code != 0:
                 return f"发送失败: {resp.msg}"
 
-            # 同时往"私聊"群发消息给 OpenCLAW，让其制作 PPT
-            if self.context.get("doc_link"):
+            # 如果 need_ppt=true，往"私聊"群发消息给 OpenCLAW，让其制作 PPT
+            need_ppt = task.params.get("need_ppt", False)
+            if need_ppt and self.context.get("doc_link"):
                 doc_url = self.context['doc_link']
                 # post 类型消息，用 at 标签正确 @ OpenCLAW
                 post_content = json.dumps({
