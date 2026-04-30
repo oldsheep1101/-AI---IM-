@@ -6,6 +6,7 @@ import json
 import os
 import re
 import time
+import httpx
 from threading import Lock
 
 from dotenv import load_dotenv
@@ -27,6 +28,10 @@ APP_SECRET = os.getenv("FEISHU_APP_SECRET", "YOUR_APP_SECRET")
 # 已处理消息 ID 集合（防止重复处理）
 processed_msg_ids: set = set()
 processed_lock = Lock()
+
+# 卡片状态缓存（chat_id -> card_json），用于 PPT 完成时更新卡片
+card_states: dict = {}
+card_lock = Lock()
 
 # 机器人启动时间（Unix 毫秒时间戳）
 bot_start_time: int = 0
@@ -52,14 +57,105 @@ def send_reply(chat_id: str, content: str) -> None:
         print(f"[发送失败] {e}")
 
 
-def send_card(card_msg_id: str, content: str) -> None:
-    """发送/更新状态卡片（目前用普通消息代替卡片）"""
-    # TODO: 后续替换为飞书交互卡片 API
-    lines = content.split("\n")
-    for line in lines:
-        if line.strip():
-            print(f"   {line}")
-    print()
+def send_card(chat_id: str, card_json: dict) -> str:
+    """发送飞书交互卡片，返回 message_id"""
+    try:
+        # 获取 tenant_access_token
+        token_url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
+        token_resp = httpx.post(token_url, json={
+            "app_id": APP_ID,
+            "app_secret": APP_SECRET
+        }, verify=True, timeout=30.0)
+        token_data = token_resp.json()
+        token = token_data.get("tenant_access_token", "")
+        if not token:
+            print(f"[卡片] 获取 token 失败")
+            return ""
+
+        url = "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id"
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        payload = {
+            "receive_id": chat_id,
+            "msg_type": "interactive",
+            "content": json.dumps(card_json)
+        }
+        resp = httpx.post(url, headers=headers, json=payload, verify=True, timeout=30.0)
+        data = resp.json()
+        if data.get("code") == 0:
+            msg_id = data.get("data", {}).get("message_id", "")
+            print(f"[卡片] 已发送, message_id={msg_id}")
+            with card_lock:
+                card_states[chat_id] = {"msg_id": msg_id, "card_json": card_json}
+            return msg_id
+        else:
+            print(f"[卡片] 发送失败: {data}")
+            return ""
+    except Exception as e:
+        print(f"[卡片] 异常: {e}")
+        return ""
+
+
+def update_card(message_id: str, card_json: dict) -> bool:
+    """PATCH 更新飞书卡片"""
+    if not message_id:
+        return False
+    try:
+        # 先获取 tenant_access_token
+        token_url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
+        token_resp = httpx.post(token_url, json={
+            "app_id": APP_ID,
+            "app_secret": APP_SECRET
+        }, verify=True, timeout=30.0)
+        token_data = token_resp.json()
+        token = token_data.get("tenant_access_token", "")
+        if not token:
+            print(f"[卡片] 获取 token 失败: {token_data}")
+            return False
+
+        url = f"https://open.feishu.cn/open-apis/im/v1/messages/{message_id}"
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        resp = httpx.patch(url, headers=headers, json={"content": json.dumps(card_json)}, verify=True, timeout=30.0)
+        data = resp.json()
+        code = data.get("code", data.get("StatusCode", -1))
+        if code == 0:
+            print(f"[卡片] 更新成功, message_id={message_id}")
+            with card_lock:
+                if message_id:
+                    card_states[message_id] = {"msg_id": message_id, "card_json": card_json}
+            return True
+        else:
+            print(f"[卡片] 更新失败: {data}")
+            return False
+    except Exception as e:
+        print(f"[卡片] 更新异常: {e}")
+        return False
+
+
+def _finalize_ppt_card() -> None:
+    """PPT 转发成功后，将主群卡片的步骤3更新为完成状态"""
+    main_chat_id = "oc_28cf04fd87a5694667a7d807b70a3257"
+    with card_lock:
+        state = card_states.get(main_chat_id)
+    if not state or not state.get("msg_id"):
+        return
+    card_json = {
+        "schema": "2.0",
+        "config": {"update_multi": True},
+        "header": {
+            "title": {"tag": "plain_text", "content": "✅ 任务完成"},
+            "template": "green"
+        },
+        "body": {
+            "elements": [
+                {"tag": "markdown", "content": "**步骤1：抓取群聊聊天记录**\n<font color='green'>✅ 完成</font>", "margin": "8px 0px 4px 0px"},
+                {"tag": "markdown", "content": "**步骤2：生成讨论总结文档**\n<font color='green'>✅ 完成</font>", "margin": "4px 0px 4px 0px"},
+                {"tag": "markdown", "content": "**步骤3：PPT 制作与转发**\n<font color='green'>✅ 完成</font>", "margin": "4px 0px 8px 0px"},
+                {"tag": "hr"},
+                {"tag": "markdown", "content": "🤖 所有任务已完成", "margin": "8px 0px 0px 0px"}
+            ]
+        }
+    }
+    update_card(state["msg_id"], card_json)
 
 
 # 飞书客户端（全局）
@@ -155,6 +251,8 @@ def handle_message(event: lark.im.v1.P2ImMessageReceiveV1) -> None:
                     )
                     feishu_client.request(req)
                     print("[PPT 转发] 成功")
+                    # PPT 转发成功后，更新主群里那张 Agent 进度卡片的步骤3为完成
+                    _finalize_ppt_card()
                 except Exception as e:
                     print(f"[PPT 转发] 失败: {e}")
             return
@@ -228,6 +326,7 @@ def handle_message(event: lark.im.v1.P2ImMessageReceiveV1) -> None:
         feishu_client=feishu_client,
         chat_id=chat_id,
         send_card_func=send_card,
+        update_card_func=update_card,
     )
 
     # 运行 Agent：规划 + 执行

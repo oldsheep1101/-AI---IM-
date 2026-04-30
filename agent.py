@@ -141,15 +141,17 @@ class Agent:
 ]
 """
 
-    def __init__(self, feishu_client, chat_id: str, send_card_func=None):
+    def __init__(self, feishu_client, chat_id: str, send_card_func=None, update_card_func=None):
         """
         feishu_client: 飞书客户端实例
         chat_id: 当前群聊 ID（用于发消息和搜消息）
-        send_card_func: 发送/更新状态卡片的函数(card_msg_id, content) -> None
+        send_card_func: 发送卡片的函数(chat_id, card_json) -> message_id
+        update_card_func: 更新卡片的函数(message_id, card_json) -> bool
         """
         self.feishu_client = feishu_client
         self.chat_id = chat_id
         self.send_card_func = send_card_func
+        self.update_card_func = update_card_func
         self.card_msg_id: Optional[str] = None
         # 跨步骤共享上下文（DOC 创建后把文档链接写这里，REPORT 读这里）
         self.context: dict = {}
@@ -220,8 +222,13 @@ class Agent:
 
             try:
                 result = self._execute_task(task)
-                task.status = "done"
-                task.result = result
+                # 如果 need_ppt=true，REPORT 步骤保持 running，等 PPT 转发回来才标记完成
+                if task.type == TaskType.REPORT.value and self.context.get("ppt_pending"):
+                    task.status = "running"
+                    task.result = result
+                else:
+                    task.status = "done"
+                    task.result = result
             except Exception as e:
                 task.status = "failed"
                 task.result = str(e)
@@ -546,7 +553,7 @@ class Agent:
             if resp.code != 0:
                 return f"发送失败: {resp.msg}"
 
-            # 如果 need_ppt=true，往"私聊"群发消息给 OpenCLAW，让其制作 PPT
+            # 如果 need_ppt=true，直接把 doc_link 发给 PPT agent 即可
             need_ppt = task.params.get("need_ppt", False)
             if need_ppt and self.context.get("doc_link"):
                 doc_url = self.context['doc_link']
@@ -574,33 +581,100 @@ class Agent:
                 )
                 ppt_resp = self.feishu_client.request(ppt_request)
                 print(f"[REPORT->OpenCLAW] resp.code={ppt_resp.code}, resp.msg={getattr(ppt_resp, 'msg', 'N/A')}")
+                # PPT 还在制作中，暂不标记完成，保持 running 状态
+                self.context["ppt_pending"] = True
 
             return f"已发送汇报：{content[:50]}..."
         except Exception as e:
             return f"发送失败: {e}"
 
-    # ==================== 状态卡片 ====================
-
-    def _update_card(self, tasks: list[Task]) -> None:
-        """更新飞书群里的状态卡片"""
-        if not self.send_card_func:
-            return
-
-        status_icons = {
-            "pending": "⚪",
-            "running": "⏳",
-            "done": "✅",
-            "failed": "❌",
-            "cancelled": "⚠️",
+    def _build_ppt_card(self) -> dict:
+        """构建 PPT 制作中的卡片"""
+        steps = [
+            ("🔍 读取文档", "waiting"),
+            ("✏️ 生成幻灯片", "waiting"),
+            ("💾 导出文件", "waiting"),
+        ]
+        elements = []
+        for i, (name, status) in enumerate(steps):
+            color = {"waiting": "grey", "running": "orange", "done": "green"}.get(status, "grey")
+            icon = {"waiting": "🔘 等待中", "running": "🔄 进行中...", "done": "✅ 已完成"}.get(status, "🔘 等待中")
+            bar = {"waiting": "", "running": "[██░░░░░░░░] 20%", "done": ""}.get(status, "")
+            content = f"**{name}**\n<font color='{color}'>{icon}</font>"
+            if bar:
+                content += f"\n{bar}"
+            elements.append({"tag": "markdown", "content": content, "margin": "8px 0px 4px 0px" if i == 0 else "4px 0px 4px 0px"})
+        elements.append({"tag": "hr"})
+        elements.append({"tag": "markdown", "content": "<font color='grey'>预计剩余时间：约 1 分钟</font>", "text_size": "small", "margin": "4px 0px 0px 0px"})
+        return {
+            "schema": "2.0",
+            "config": {"update_multi": True},
+            "header": {
+                "title": {"tag": "plain_text", "content": "📊 PPT 制作中"},
+                "template": "blue"
+            },
+            "body": {"elements": elements}
         }
 
-        lines = ["🤖 **Agent 执行进度**\n"]
-        for t in tasks:
-            icon = status_icons.get(t.status, "⚪")
-            lines.append(f"{icon} 步骤{t.step}：{t.desc} [{t.status}]")
+    def _send_ppt_card_to_main(self) -> str:
+        """发一张 PPT 制作中的卡片到主群，返回 message_id"""
+        if not self.send_card_func:
+            return ""
+        card_json = self._build_ppt_card()
+        msg_id = self.send_card_func(self.chat_id, card_json)
+        print(f"[PPT卡片] 已发送到主群, message_id={msg_id}")
+        # 清空 card_msg_id，防止主 agent 后续覆盖这张卡
+        self.card_msg_id = None
+        return msg_id
 
-        card_content = "\n".join(lines)
-        self.send_card_func(self.card_msg_id, card_content)
+    # ==================== 状态卡片 ====================
+
+    def _build_card(self, tasks: list[Task]) -> dict:
+        """构建卡片 JSON"""
+        status_colors = {
+            "pending": "<font color='grey'>🔘 等待中</font>",
+            "running": "<font color='orange'>🔄 进行中</font>",
+            "done": "<font color='green'>✅ 完成</font>",
+            "failed": "<font color='red'>❌ 失败</font>",
+            "cancelled": "<font color='grey'>⚠️ 已取消</font>",
+        }
+        elements = []
+        for t in tasks:
+            color_tag = status_colors.get(t.status, status_colors["pending"])
+            elements.append({
+                "tag": "markdown",
+                "content": f"**步骤{t.step}：{t.desc}**\n{color_tag}",
+                "margin": "8px 0px 4px 0px"
+            })
+        elements.append({"tag": "hr"})
+        elements.append({
+            "tag": "markdown",
+            "content": "🤖 Agent 执行中...",
+            "margin": "8px 0px 0px 0px"
+        })
+        return {
+            "schema": "2.0",
+            "config": {"update_multi": True},
+            "header": {
+                "title": {"tag": "plain_text", "content": "🤖 Agent 执行进度"},
+                "template": "blue"
+            },
+            "body": {"elements": elements}
+        }
+
+    def _update_card(self, tasks: list[Task]) -> None:
+        """发送或更新飞书卡片（首次发，后续更新）"""
+        if not self.send_card_func:
+            return
+        card_json = self._build_card(tasks)
+        if not self.card_msg_id:
+            msg_id = self.send_card_func(self.chat_id, card_json)
+            self.card_msg_id = msg_id
+            print(f"[卡片] 已发送, message_id={msg_id}")
+        else:
+            if self.update_card_func:
+                ok = self.update_card_func(self.card_msg_id, card_json)
+                print(f"[卡片] 更新{'成功' if ok else '失败'}, message_id={self.card_msg_id}")
 
     # ==================== 入口 ====================
 
