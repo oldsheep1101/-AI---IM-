@@ -238,6 +238,52 @@ class Agent:
 
             self._update_card(tasks)
 
+            # === Human-in-the-loop：DOC 步骤完成后、REPORT 执行前 ===
+            # 发确认卡片，等用户点按钮才继续（通过 WebSocket card_action 事件触发 resume）
+            # 判断条件：DOC 是当前步骤 且 下一个步骤是 REPORT 且 need_ppt=true
+            if task.type == TaskType.DOC.value:
+                idx = tasks.index(task)
+                next_task = tasks[idx + 1] if idx + 1 < len(tasks) else None
+                need_ppt = next_task and next_task.type == TaskType.REPORT.value and next_task.params.get("need_ppt")
+                if need_ppt:
+                    self._send_confirm_card(tasks)
+                    self.context["awaiting_confirm"] = True
+                    self.context["pending_tasks"] = tasks
+                    print("[Agent] 等待用户确认大纲...")
+                    return tasks
+
+        return tasks
+
+    def resume(self, tasks: list[Task], confirmed: bool) -> list[Task]:
+        """从确认卡片处恢复执行（用户点击按钮后由 main.py 调用）"""
+        print(f"[Agent] resume called, confirmed={confirmed}")
+        self.context["awaiting_confirm"] = False
+
+        if not confirmed:
+            # 打回场景已改为用户手动修改文档，此分支不再需要
+            # 保持原有任务状态不变，等待用户修改完成后点 confirm
+            print("[Agent] 用户打回，等待手动修改文档")
+            return tasks
+
+        # 确认后执行 REPORT（已在列表中，跳过已完成的步骤）
+        for task in tasks:
+            if task.status in ("done", "failed", "cancelled"):
+                continue
+            task.status = "running"
+            self._update_card(tasks)
+            try:
+                result = self._execute_task(task)
+                if task.type == TaskType.REPORT.value and self.context.get("ppt_pending"):
+                    task.status = "running"
+                    task.result = result
+                else:
+                    task.status = "done"
+                    task.result = result
+            except Exception as e:
+                task.status = "failed"
+                task.result = str(e)
+            self._update_card(tasks)
+
         return tasks
 
     def _execute_task(self, task: Task) -> str:
@@ -471,6 +517,24 @@ class Agent:
             doc_link = f"https://feishu.cn/docx/{doc_id}"
             print(f"[DOC] 文档已创建: doc_id={doc_id}")
 
+            # 2. 开放文档编辑权限给所有参与讨论的人
+            try:
+                perm_url = f"https://open.feishu.cn/open-apis/drive/v1/permissions/{doc_id}/members?type=docx"
+                headers = {"Authorization": f"Bearer {self._get_token()}", "Content-Type": "application/json"}
+                # 给所有群成员加编辑权限
+                member_ids = [
+                    "ou_9f07561e326f93aa980c784bfdda6e29",  # PM
+                ]
+                for mid in member_ids:
+                    resp = httpx.post(perm_url, headers=headers, json={
+                        "member_type": "openid",
+                        "member_id": mid,
+                        "perm": "edit"
+                    }, verify=True, timeout=15.0)
+                    print(f"[DOC] 权限开放 resp={resp.json()}")
+            except Exception as e:
+                print(f"[DOC] 权限开放失败: {e}")
+
             # 2. 写入内容（通过 httpx，绕过 SDK 的 bug）
             # 过滤掉 <think> 等标签内容
             import re
@@ -555,6 +619,8 @@ class Agent:
 
             # 如果 need_ppt=true，直接把 doc_link 发给 PPT agent 即可
             need_ppt = task.params.get("need_ppt", False)
+            if need_ppt:
+                self.context["need_ppt"] = True
             if need_ppt and self.context.get("doc_link"):
                 doc_url = self.context['doc_link']
                 # post 类型消息，用 at 标签正确 @ OpenCLAW
@@ -661,6 +727,60 @@ class Agent:
             },
             "body": {"elements": elements}
         }
+
+    def _build_confirm_card(self, tasks: list[Task]) -> dict:
+        """构建待确认的卡片（带按钮）"""
+        elements = []
+        for t in tasks:
+            color_tag = {
+                "pending": "<font color='grey'>🔘 等待中</font>",
+                "running": "<font color='orange'>🔄 进行中</font>",
+                "done": "<font color='green'>✅ 完成</font>",
+                "failed": "<font color='red'>❌ 失败</font>",
+            }.get(t.status, "<font color='grey'>🔘 等待中</font>")
+            elements.append({
+                "tag": "markdown",
+                "content": f"**步骤{t.step}：{t.desc}**\n{color_tag}",
+                "margin": "8px 0px 4px 0px"
+            })
+
+        elements.append({"tag": "hr"})
+        elements.append({
+            "tag": "markdown",
+            "content": f"📄 **文档已生成**：{self.context.get('doc_link', '')}\n请确认内容无误后，点击下方按钮生成 PPT",
+            "margin": "8px 0px 4px 0px"
+        })
+        elements.append({
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": "✅ 确认大纲，生成 PPT"},
+            "type": "callback",
+            "value": {"action": "confirm_ppt", "doc_link": self.context.get("doc_link", "")}
+        })
+        elements.append({
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": "🔄 大纲有误，去云文档修改"},
+            "type": "callback",
+            "value": {"action": "retry"}
+        })
+        return {
+            "schema": "2.0",
+            "config": {"update_multi": True},
+            "header": {
+                "title": {"tag": "plain_text", "content": "⏳ 待确认大纲"},
+                "template": "yellow"
+            },
+            "body": {"elements": elements}
+        }
+
+    def _send_confirm_card(self, tasks: list[Task]) -> str:
+        """发送待确认卡片，返回 message_id"""
+        if not self.send_card_func:
+            return ""
+        card_json = self._build_confirm_card(tasks)
+        msg_id = self.send_card_func(self.chat_id, card_json)
+        self.card_msg_id = msg_id
+        print(f"[确认卡片] 已发送, message_id={msg_id}")
+        return msg_id
 
     def _update_card(self, tasks: list[Task]) -> None:
         """发送或更新飞书卡片（首次发，后续更新）"""

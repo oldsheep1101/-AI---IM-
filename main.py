@@ -12,6 +12,7 @@ from threading import Lock
 from dotenv import load_dotenv
 import lark_oapi as lark
 from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
+from lark_oapi.event.callback.model.p2_card_action_trigger import P2CardActionTrigger
 from lark_oapi.event.dispatcher_handler import EventDispatcherHandler
 
 from agent import Agent
@@ -32,6 +33,10 @@ processed_lock = Lock()
 # 卡片状态缓存（chat_id -> card_json），用于 PPT 完成时更新卡片
 card_states: dict = {}
 card_lock = Lock()
+
+# Agent 状态（chat_id -> {"msg_id": ..., "card_msg_id": ..., "context": {}}）
+agent_states: dict = {}
+agent_lock = Lock()
 
 # 机器人启动时间（Unix 毫秒时间戳）
 bot_start_time: int = 0
@@ -160,6 +165,119 @@ def _finalize_ppt_card() -> None:
 
 # 飞书客户端（全局）
 feishu_client: lark.Client = None
+
+
+from lark_oapi.event.callback.model.p2_card_action_trigger import P2CardActionTrigger
+
+
+def handle_card_action(event: P2CardActionTrigger) -> None:
+    """处理卡片按钮点击事件"""
+    import traceback
+    try:
+        trigger_data = event.event
+        action = trigger_data.action
+        context = trigger_data.context
+        chat_id = context.open_chat_id if context else ""
+        message_id = context.open_message_id if context else ""
+        print(f"[CardAction] chat_id={chat_id}, message_id={message_id}")
+        print(f"[CardAction] action object: {dir(action)}")
+        print(f"[CardAction] action attrs: {[(k, getattr(action, k, None)) for k in dir(action) if not k.startswith('_')]}")
+
+        # 解析按钮 value
+        action_data = {}
+        if hasattr(action, "value") and action.value:
+            action_data = action.value
+            if isinstance(action_data, str):
+                action_data = json.loads(action_data)
+        elif hasattr(action, "action_value") and action.action_value:
+            action_data = action.action_value or {}
+            if isinstance(action_data, str):
+                action_data = json.loads(action_data)
+
+        action_type = action_data.get("action", "")
+        print(f"[CardAction] action_type={action_type}, action_data={action_data}")
+
+        # 查找对应 chat_id 的 Agent 状态
+        with agent_lock:
+            state = agent_states.get(chat_id)
+        if not state:
+            print(f"[CardAction] 未找到 chat_id={chat_id} 的 Agent 状态，跳过")
+            return
+
+        tasks = state.get("tasks", [])
+        if not tasks:
+            print(f"[CardAction] tasks 为空，跳过")
+            return
+
+        # 构建 Agent 实例（复用 card 函数以便更新卡片）
+        agent = Agent(
+            feishu_client=feishu_client,
+            chat_id=chat_id,
+            send_card_func=send_card,
+            update_card_func=update_card,
+        )
+        agent.card_msg_id = state.get("card_msg_id") or state.get("msg_id")
+        agent.context = state.get("context", {})
+
+        if action_type == "confirm_ppt":
+            print("[CardAction] 用户确认大纲，继续生成 PPT")
+            # 更新卡片为 PPT 制作中状态
+            ppt_card = agent._build_ppt_card()
+            if agent.card_msg_id:
+                update_card(agent.card_msg_id, ppt_card)
+            # 恢复执行
+            results = agent.resume(tasks, confirmed=True)
+            # 重新保存状态
+            with agent_lock:
+                agent_states[chat_id] = {
+                    "msg_id": agent.card_msg_id,
+                    "card_msg_id": agent.card_msg_id,
+                    "context": agent.context,
+                    "tasks": results,
+                }
+
+        elif action_type == "retry":
+            print("[CardAction] 用户打回，等待手动修改文档")
+            # 提示用户手动修改文档，修改完再点 confirm
+            wait_card = {
+                "schema": "2.0",
+                "config": {"update_multi": True},
+                "header": {
+                    "title": {"tag": "plain_text", "content": "📝 请手动修改文档"},
+                    "template": "orange"
+                },
+                "body": {
+                    "elements": [
+                        {"tag": "markdown", "content": "**请前往云文档手动修改内容**", "margin": "8px 0px 4px 0px"},
+                        {"tag": "markdown", "content": f"文档链接：{agent.context.get('doc_link', '未知')}", "margin": "4px 0px 4px 0px"},
+                        {"tag": "hr"},
+                        {"tag": "markdown", "content": "修改完成后，点下方按钮继续生成 PPT", "margin": "4px 0px 8px 0px"},
+                        {
+                            "tag": "button",
+                            "text": {"tag": "plain_text", "content": "✅ 确认大纲，生成 PPT"},
+                            "type": "callback",
+                            "value": {"action": "confirm_ppt", "doc_link": agent.context.get("doc_link", "")}
+                        }
+                    ]
+                }
+            }
+            if agent.card_msg_id:
+                update_card(agent.card_msg_id, wait_card)
+            # 不再重置 context，保留 doc_link 等信息
+            # 等待用户修改完点 confirm_ppt
+            with agent_lock:
+                agent_states[chat_id] = {
+                    "msg_id": agent.card_msg_id,
+                    "card_msg_id": agent.card_msg_id,
+                    "context": agent.context,
+                    "tasks": tasks,
+                }
+        else:
+            print(f"[CardAction] 未知 action_type={action_type}")
+
+    except Exception as e:
+        print(f"[CardAction] 异常: {type(e).__name__}: {e}")
+        traceback.print_exc()
 
 
 def handle_message(event: lark.im.v1.P2ImMessageReceiveV1) -> None:
@@ -329,12 +447,70 @@ def handle_message(event: lark.im.v1.P2ImMessageReceiveV1) -> None:
         update_card_func=update_card,
     )
 
+    # === Human-in-the-loop 文字指令处理 ===
+    # 当 Agent 处于等待确认状态时，接收 confirm/retry 文字命令
+    user_text_lower = user_text.lower().strip()
+    if user_text_lower in ("confirm", "retry"):
+        print(f"[文字指令]收到 {user_text_lower}，查找待确认状态")
+        with agent_lock:
+            state = agent_states.get(chat_id)
+        if state and state.get("context", {}).get("awaiting_confirm"):
+            tasks = state.get("tasks", [])
+            agent.card_msg_id = state.get("card_msg_id") or state.get("msg_id")
+            agent.context = state.get("context", {})
+            confirmed = (user_text_lower == "confirm")
+            print(f"[文字指令] 执行 resume, confirmed={confirmed}")
+            if confirmed:
+                # 更新卡片为 PPT 制作中
+                ppt_card = agent._build_ppt_card()
+                if agent.card_msg_id:
+                    update_card(agent.card_msg_id, ppt_card)
+            else:
+                # 打回：更新卡片为等待修改状态
+                wait_card = {
+                    "schema": "2.0",
+                    "config": {"update_multi": True},
+                    "header": {
+                        "title": {"tag": "plain_text", "content": "📝 请手动修改文档"},
+                        "template": "orange"
+                    },
+                    "body": {
+                        "elements": [
+                            {"tag": "markdown", "content": "**请前往云文档手动修改内容**", "margin": "8px 0px 4px 0px"},
+                            {"tag": "markdown", "content": f"文档链接：{agent.context.get('doc_link', '未知')}", "margin": "4px 0px 4px 0px"},
+                            {"tag": "hr"},
+                            {"tag": "markdown", "content": "修改完成后，**直接回复 `confirm`** 继续生成 PPT", "margin": "4px 0px 8px 0px"},
+                        ]
+                    }
+                }
+                if agent.card_msg_id:
+                    update_card(agent.card_msg_id, wait_card)
+            results = agent.resume(tasks, confirmed=confirmed)
+            with agent_lock:
+                agent_states[chat_id] = {
+                    "msg_id": agent.card_msg_id,
+                    "card_msg_id": agent.card_msg_id,
+                    "context": agent.context,
+                    "tasks": results,
+                }
+            return
+
     # 运行 Agent：规划 + 执行
     try:
         results = agent.run(user_text)
         done = sum(1 for t in results if t.status == "done")
         failed = sum(1 for t in results if t.status == "failed")
         print(f"[Agent 执行完成] {done} 成功, {failed} 失败")
+
+        # 保存 Agent 状态（供 card_action 回调查找）
+        if results:
+            with agent_lock:
+                agent_states[chat_id] = {
+                    "msg_id": agent.card_msg_id,
+                    "card_msg_id": agent.card_msg_id,
+                    "context": agent.context,
+                    "tasks": results,
+                }
     except Exception as e:
         import traceback
         print(f"[Agent 执行异常] {type(e).__name__}: {e}")
@@ -365,6 +541,7 @@ def main():
     dispatcher = (
         EventDispatcherHandler.builder(encrypt_key="", verification_token="")
         .register_p2_im_message_receive_v1(handle_message)
+        .register_p2_card_action_trigger(handle_card_action)
         .build()
     )
 
