@@ -1,75 +1,9 @@
-# 飞书 AI Agent 机器人
+# 基于 IM 的办公协同智能助手
 
 通过自然语言指令，在飞书群聊中自动完成"读取聊天记录 → 生成云文档 → 制作 PPT"的完整工作流。
 
 ## 架构图
-
-```graph TB
-    subgraph 用户层["👤 用户层"]
-        Mobile["📱 移动端 iOS/Android"]
-        Desktop["💻 桌面端 macOS/Windows"]
-    end
-
-    subgraph 飞书平台["☁️ 飞书开放平台"]
-        IM["💬 IM 群聊/单聊"]
-        Card["🧩 交互卡片"]
-        DocAPI["📄 文档 API"]
-        PPTAPI["📊 PPT 联动"]
-    end
-
-    subgraph 接入层["📡 接入层"]
-        WS["WebSocket 长连接<br/>lark.ws.Client"]
-        Dispatcher["EventDispatcherHandler<br/>• p2_im_message_receive_v1<br/>• p2_card_action_trigger"]
-    end
-
-    subgraph 核心引擎["🧠 AI Agent 核心引擎 main.py / agent.py"]
-        Router["事件路由<br/>handle_message() / handle_card_action()"]
-        Planner["LLM Planner<br/>MiniMax M2.7<br/>意图理解 → 任务拆解"]
-        Executor["任务执行器 Executor"]
-        Research["🔍 RESEARCH<br/>读消息/OCR/Excel/PDF"]
-        Doc["📝 DOC<br/>创建文档/写块/传图"]
-        Report["📣 REPORT<br/>发总结/推链接/触发PPT"]
-        StateMachine["状态机<br/>planning→researching→writing→confirming→done"]
-        HIL["Human-in-the-loop<br/>卡片确认中断/恢复"]
-    end
-
-    subgraph 数据层["💾 数据层"]
-        MsgStore["messages.jsonl<br/>群聊消息持久化"]
-        Attachment["附件处理<br/>Tesseract OCR<br/>openpyxl / pypdf"]
-    end
-
-    subgraph 外部服务["🔌 外部服务"]
-        MiniMax["MiniMax API"]
-        OpenCLAW["OpenCLAW PPT 生成"]
-    end
-
-    Mobile --> IM
-    Desktop --> IM
-    IM --> WS
-    Card --> WS
-    WS --> Dispatcher
-    Dispatcher --> Router
-    Router --> Planner
-    Planner --> MiniMax
-    Planner --> Executor
-    Executor --> Research
-    Executor --> Doc
-    Executor --> Report
-    Research --> MsgStore
-    Research --> Attachment
-    Doc --> DocAPI
-    Report --> PPTAPI
-    PPTAPI --> OpenCLAW
-    Report --> Card
-    StateMachine --> HIL
-    HIL --> Card
-    Router --> StateMachine
-
-    style 核心引擎 fill:#e1f5fe,stroke:#0288d1
-    style Planner fill:#fff3e0,stroke:#f57c00
-    style Executor fill:#e8f5e9,stroke:#388e3c
-    style HIL fill:#fce4ec,stroke:#c62828
-```
+<img width="6569" height="5256" alt="deepseek_mermaid_20260507_08771f" src="https://github.com/user-attachments/assets/d4139b19-f848-4334-b75c-596dae658f2f" />
 
 ## 目录结构
 
