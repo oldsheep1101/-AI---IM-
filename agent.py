@@ -93,6 +93,7 @@ class Agent:
 | REPORT      | 向用户发送文字汇报        | content: 汇报文本, need_ppt: 是否需要制作PPT |
 
 【意图识别规则】
+- 用户说"总结"、"整理"、"汇总"群聊记录 → 必须 RESEARCH + DOC + REPORT，need_ppt=false
 - 用户只说"整理成文档"、"生成文档"、"写成文档" → REPORT 的 need_ppt=false，不联系 OpenCLAW
 - 用户说"做成 PPT"、"生成 PPT"、"做汇报"、"汇报 PPT" → REPORT 的 need_ppt=true，需要联系 OpenCLAW 制作
 - 如果不确定，就默认 need_ppt=false（不制作 PPT）
@@ -157,6 +158,20 @@ class Agent:
         self.context: dict = {}
 
     # ==================== Planner ====================
+
+    def _resolve_sender_name(self, sender_obj: dict, feishu_client=None) -> str:
+        """从 sender 字典直接取 name，机器人或无 name 时返回 id 尾部"""
+        if not sender_obj or not isinstance(sender_obj, dict):
+            return "未知用户"
+        name = sender_obj.get("name", "")
+        if name:
+            return name
+        sender_type = sender_obj.get("sender_type", "")
+        sender_id_type = sender_obj.get("id_type", "")
+        sender_id = sender_obj.get("id", "")
+        if sender_type == "app" or sender_id_type == "app_id":
+            return f"[BOT] {sender_id.split('_')[-1]}" if sender_id else "[BOT]"
+        return sender_id.split("_")[-1] if sender_id else "未知用户"
 
     def plan(self, user_input: str) -> list[Task]:
         """调用 MiniMax 生成任务清单"""
@@ -347,61 +362,210 @@ class Agent:
         return start_ts, end_ts
 
     def _do_research(self, task: Task) -> str:
-        """读取本地聊天记录文件，按时间筛选后用 LLM 总结"""
-        import tempfile
-        with open("/tmp/debug_start.txt", "w") as f:
-            f.write(f"_do_research called, params={task.params}\n")
-
-        msg_file = "/Users/phoenix_oldsheep/feishu_messages/messages.txt"
+        """读取本地聊天记录文件（messages.jsonl），支持图片/文件等多媒体，按时间筛选后用 LLM 总结"""
+        msg_file = "/Users/phoenix_oldsheep/feishu_messages/messages.jsonl"
+        files_dir = "/Users/phoenix_oldsheep/feishu_messages/files"
         query = task.params.get("query", "")
         date_range = task.params.get("date_range", "")  # 如"今天"、"近3天"、"本周"
 
         # 解析时间范围
         start_ts, end_ts = self._parse_relative_date(date_range)
         print(f"[RESEARCH] 读取文件: {msg_file}, date_range={date_range}, start={start_ts}, end={end_ts}")
-        with open("/tmp/debug_before_open.txt", "w") as f:
-            f.write(f"start_ts={start_ts}, end_ts={end_ts}\n")
 
         try:
             with open(msg_file, "r", encoding="utf-8") as f:
                 lines = f.readlines()
-            print(f"[RESEARCH] 文件读取成功，共 {len(lines)} 行")
+            print(f"[RESEARCH] 文件读取成功，共 {len(lines)} 条消息")
         except FileNotFoundError:
             return f"未找到聊天记录文件：{msg_file}"
         except Exception as e:
             return f"读取文件失败: {e}"
 
-        # 按时间筛选
-        filtered_lines = []
+        # 按时间筛选并组装内容
+        messages_for_summary = []
+        image_files: dict = {}  # filename -> local_path，用于后续文档嵌入
         for line in lines:
             line = line.strip()
             if not line:
                 continue
-            # 格式: [2026-04-27 18:58:12] [chat_id] sender_id: message
-            m = re.match(r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]", line)
-            if m:
-                ts_str = m.group(1)
-                try:
-                    dt = datetime.datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
-                    line_ts = int(dt.timestamp() * 1000)
-                    if start_ts and line_ts < start_ts:
-                        continue
-                    if end_ts and line_ts > end_ts:
-                        continue
-                except ValueError:
-                    pass
-            filtered_lines.append(line)
+            try:
+                msg = json.loads(line)
+            except json.JSONDecodeError:
+                continue
 
-        raw_content = "\n".join(filtered_lines)
+            # 时间筛选
+            create_time_str = msg.get("create_time", "")
+            # 格式可能是 "2026-05-02 14:49" 或时间戳字符串
+            line_ts = None
+            try:
+                if create_time_str.isdigit():
+                    line_ts = int(create_time_str)
+                else:
+                    dt = datetime.datetime.strptime(create_time_str, "%Y-%m-%d %H:%M")
+                    line_ts = int(dt.timestamp() * 1000)
+            except Exception:
+                pass
+
+            if start_ts and line_ts and line_ts < start_ts:
+                continue
+            if end_ts and line_ts and line_ts > end_ts:
+                continue
+
+            msg_type = msg.get("msg_type", msg.get("message_type", "text"))
+            parsed_text = msg.get("parsed_text", "") or msg.get("content", "")
+            sender_obj = msg.get("sender", {})
+            sender = self._resolve_sender_name(sender_obj, self.feishu_client)
+
+            attachments = msg.get("attachments", [])
+            extra_content = ""
+            for att in attachments:
+                att_type = att.get("type", "")
+                local_path = att.get("local_path", "")
+                file_name = att.get("file_name", "")
+
+                if not local_path or not os.path.exists(local_path):
+                    if file_name:
+                        extra_content += f" [附件: {file_name}]"
+                    continue
+
+                ext = local_path.rsplit(".", 1)[-1].lower()
+
+                if ext in ("png", "jpg", "jpeg", "gif", "webp", "bmp"):
+                    # 图片：OCR 识别文字，同时收集文件路径供后续嵌入文档用
+                    ocr_text = ""
+                    try:
+                        import subprocess
+                        result = subprocess.run(
+                            ["tesseract", local_path, "stdout", "--psm", "6", "-l", "chi_sim+eng"],
+                            capture_output=True, timeout=30
+                        )
+                        ocr_text = result.stdout.decode("utf-8").strip()
+                    except Exception as e:
+                        pass
+                    print(f"[DEBUG] OCR完成 file_name={file_name}, ocr_text长度={len(ocr_text)}, local_path={local_path}")
+                    image_files[file_name] = local_path  # key 用 file_name，方便后续匹配 LLM 输出
+                    if ocr_text:
+                        extra_content += f"[图片文件: {file_name}] [图片内容: {ocr_text}]"
+                    else:
+                        extra_content += f"[图片文件: {file_name}]"
+
+                elif ext == "pdf":
+                    # PDF：提取文本
+                    try:
+                        from pypdf import PdfReader
+                        reader = PdfReader(local_path)
+                        pdf_texts = []
+                        for page in reader.pages:
+                            text = page.extract_text()
+                            if text:
+                                pdf_texts.append(text.strip())
+                        if pdf_texts:
+                            extra_content += f" [PDF内容: {' '.join(pdf_texts)}]"
+                        else:
+                            extra_content += f" [文件: {file_name}]"
+                    except Exception as e:
+                        extra_content += f" [文件: {file_name}]"
+
+                elif ext in ("docx", "doc"):
+                    # Word 文档：提取段落文本
+                    try:
+                        from docx import Document
+                        doc = Document(local_path)
+                        texts = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
+                        if texts:
+                            extra_content += f" [Word内容: {' '.join(texts)}]"
+                        else:
+                            extra_content += f" [文件: {file_name}]"
+                    except Exception as e:
+                        extra_content += f" [文件: {file_name}]"
+
+                elif ext in ("xlsx", "xls"):
+                    # Excel：读取单元格内容
+                    try:
+                        import openpyxl
+                        wb = openpyxl.load_workbook(local_path, data_only=True)
+                        sheet_texts = []
+                        for sheet in wb.worksheets:
+                            rows = list(sheet.iter_rows(values_only=True))
+                            for row in rows:
+                                row_text = " | ".join(str(c) if c is not None else "" for c in row)
+                                if row_text.strip():
+                                    sheet_texts.append(row_text)
+                        print(f"[DEBUG] Excel read: {file_name}, rows={len(sheet_texts)}")
+                        if sheet_texts:
+                            extra_content += f" [Excel内容: {' ; '.join(sheet_texts)}]"
+                        else:
+                            extra_content += f" [文件: {file_name}]"
+                    except Exception as e:
+                        print(f"[DEBUG] Excel read error: {e}")
+                        extra_content += f" [文件: {file_name}]"
+
+                else:
+                    extra_content += f" [文件: {file_name}]"
+
+            if msg_type == "text" or msg_type == "post":
+                line_text = f"{sender}：{parsed_text}{extra_content}"
+            elif msg_type in ("image", "file"):
+                line_text = f"{sender}：{extra_content}"
+            else:
+                line_text = f"{sender}：{parsed_text or '[无法解析的消息]'}{extra_content}"
+
+            messages_for_summary.append(line_text)
+
+        raw_content = "\n".join(messages_for_summary)
         if not raw_content:
             return "在指定时间范围内未找到聊天记录"
 
-        print(f"[RESEARCH] 筛选后 {len(filtered_lines)} 条消息，字符数: {len(raw_content)}，开始 LLM 总结...")
+        print(f"[RESEARCH] 筛选后 {len(messages_for_summary)} 条消息，字符数: {len(raw_content)}")
 
-        # 用 MiniMax LLM 总结
+        # 用 MiniMax LLM 总结（纯文本），让 LLM 决定哪些图片要保留
         SYSTEM_PROMPT = """你是一个专业的飞书文档助手。请将下面的群聊记录整理成一份适合写入飞书云文档的纯文本总结。
 
-输出格式要求（严格遵守）：
+【重要：图片处理规则】
+群聊中出现的所有图片（包括海报、Banner、广告图、设计图），一律必须使用 [保留图片: 文件名] 写入文档，绝对禁止使用 [图片总结]。
+
+具体要求：
+1. 任何 .png / .jpg / .gif / .webp / .bmp 后缀的附件文件，消息中会显示为 [图片文件: xxx.png]，必须从中提取原始文件名，输出 [保留图片: xxx.png]
+2. 绝对禁止自己起文件名，必须使用消息中 [图片文件:] 标签后的实际文件名
+3. [图片内容: ...] 是 OCR 识别结果，仅供文字参考，不影响图片嵌入判断
+4. 海报/广告图/设计图等有视觉价值的图片，无论 OCR 结果如何，都必须用 [保留图片:] 嵌入原图
+
+注意以下几类文件的内容已经是完整文字，不需要额外标记保留：
+- Excel/Word/PDF 等文件的内容，已通过 [Excel内容:] / [Word内容:] / [PDF内容:] 的形式完整嵌入文档，
+  不要再对这些文件使用 [保留图片:] 或 [保留文件:] 等任何标记。
+- 如果群聊消息中只是"提到了某个文件"而没有实际附件，也不要标记。
+- 同一文件如果已有 [Excel内容:] / [Word内容:] 等标记，不要重复标记。
+
+【文件名规则 - 禁止自行命名】
+所有 [保留图片:] 输出的文件名，必须100%匹配消息中 attachments 数组里的 file_name 字段，不允许更改、翻译、概括、添加后缀。
+
+例如：消息里附件的 file_name 是"大促大屏广告.png"，你就必须写 [保留图片: 大促大屏广告.png]，绝对不能写成 [保留图片: 爆发期.jpg]、[保留图片: 广告图1.png] 等。
+
+文件扩展名也必须与原始文件名一致，不得擅自改变（如 .png 不能变成 .jpg）。
+如果不确定原始文件名，参考 [图片内容:] 前的文件名部分。
+
+以下图片必须保留（这些无法用文字替代）：
+- 海报、Banner、设计图、视觉稿
+- 截图（含文字、界面、数据）
+- 流程图、架构图、PPT截图
+- 图表、表格截图（尤其是设计稿、数据大屏等）
+- 代码截图
+
+【来源引用规则】
+文档正文中引用任何来自附件的内容时，必须注明来源：
+- 引用图片内容：格式为"根据群聊中上传的【文件名】显示/指出/表明……"
+- 引用Excel数据：格式为"根据附件【文件名】显示/表明……"
+- 引用PDF内容：格式为"参考附件【文件名】，……"
+- 引用Word内容：格式为"根据【文件名】，……"
+
+示例：
+- "根据群聊中上传的 Q3营收折线图.png 显示，第三季度增长达到15%。"
+- "参考附件 用户需求.pdf，核心痛点已提炼如下……"
+- "根据 20241103_双11项目预热结案_库存与投放复盘_V2.xlsx，明星精华液套装缺口7000件。"
+
+禁止：直接描述附件内容而不注明来源，或用"根据图表/表格/文件显示"而不写具体文件名。
+
+【输出格式要求】
 1. 用 [H1]标题 表示一级标题（对应飞书文档的一级标题）
 2. 用 [H2]标题 表示二级标题
 3. 用 [H3]标题 表示三级标题
@@ -412,17 +576,18 @@ class Agent:
 格式示例：
 [H1]会议总结
 [H2]一、主要讨论话题
+[保留图片: 架构图.png]
 这里是内容...
 [H2]二、已达成的结论
-- 结论1
-- 结论2
-替换为：
-[H2]二、已达成的结论
+[图片总结: 会议现场拍摄的照片，显示白板上写着关键结论]
 结论1
 结论2"""
 
-        print(f"[RESEARCH] raw_content 前100字: {repr(raw_content[:100])}")
+        print(f"[RESEARCH] raw_content 前200字:\n{raw_content[:200]}")
+        print(f"[RESEARCH] raw_content 中是否有'[图片内容:': {'[图片内容:' in raw_content}")
+        print(f"[RESEARCH] raw_content 中是否有'[Excel内容:': {'[Excel内容:' in raw_content}")
         print(f"[RESEARCH] 准备调用 MiniMax API...")
+
         try:
             response = _get_minimax_client().chat.completions.create(
                 model="MiniMax-M2.7",
@@ -438,7 +603,6 @@ class Agent:
             import traceback
             import sys
             print(f"[RESEARCH] 调用异常: {type(e).__name__}: {e}")
-            sys.stdout.flush()
             traceback.print_exc()
             sys.stdout.flush()
             with open("/tmp/debug_research.txt", "w") as f:
@@ -448,8 +612,26 @@ class Agent:
             return f"LLM 总结失败: {e}"
 
         print(f"[RESEARCH] 总结完成，长度: {len(summary)} 字符")
+        print(f"[DEBUG] LLM输出中是否有'[保留图片:': {'[保留图片:' in summary}")
+        print(f"[DEBUG] LLM输出中是否有'[图片总结:': {'[图片总结:' in summary}")
+        print(f"[DEBUG] LLM输出前300字:\n{summary[:300]}")
+        print(f"[DEBUG] image_files 内容: {image_files}")
         self.context["research_result"] = summary
+        self.context["summary"] = summary
+        self.context["image_files"] = image_files
         return summary
+
+    def _get_bot_id(self) -> str:
+        """获取机器人自身的 open_id"""
+        try:
+            url = "https://open.feishu.cn/open-apis/bot/v3/info"
+            resp = httpx.get(url, headers={"Authorization": f"Bearer {self._get_token()}"}, verify=True, timeout=15.0)
+            data = resp.json()
+            if data.get("code") == 0:
+                return data.get("bot", {}).get("open_id", "")
+        except Exception as e:
+            print(f"[DOC] 获取 bot id 失败: {e}")
+        return ""
 
     def _get_token(self) -> str:
         """获取 tenant_access_token（带缓存）"""
@@ -462,7 +644,62 @@ class Agent:
         }, verify=True, timeout=30.0)
         data = resp.json()
         self._cached_token = data.get("tenant_access_token", "")
+        print(f"[DEBUG] token 获取: {self._cached_token[:20] if self._cached_token else 'EMPTY'}...")
         return self._cached_token
+
+    def _upload_image_to_doc(self, local_path: str, document_id: str) -> str:
+        """上传图片到飞书文档，返回 image_key"""
+        import os
+        filename = os.path.basename(local_path)
+        with open(local_path, "rb") as f:
+            img_data = f.read()
+        self._cached_token = None  # 强制刷新 token
+        token = self._get_token()
+        headers = {"Authorization": f"Bearer {token}"}
+        # 用 drive API 上传文档图片
+        resp = httpx.post(
+            "https://open.feishu.cn/open-apis/drive/v1/medias/upload_all",
+            headers=headers,
+            data={
+                "parent_type": "docx_image",
+                "parent_id": document_id,
+                "extra": json.dumps({"drive_route_token": document_id}),
+            },
+            files={"file": (filename, img_data, "image/png")},
+            timeout=30.0
+        )
+        result = resp.json()
+        print(f"[DEBUG] drive上传 result={result}")
+        if result.get("code") == 0:
+            return result.get("data", {}).get("file_token", "")
+        print(f"[DOC] 图片上传失败: {result}")
+        return ""
+
+    def _add_doc_image_block(self, doc_id: str, image_key: str) -> dict:
+        """向文档插入图片块"""
+        url = f"https://open.feishu.cn/open-apis/docx/v1/documents/{doc_id}/blocks/{doc_id}/children"
+        headers = {
+            "Authorization": f"Bearer {self._get_token()}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "children": [{
+                "block_type": 27,
+                "image": {
+                    "token": image_key,
+                    "width": 600,
+                    "height": 400
+                }
+            }]
+        }
+        print(f"[DEBUG] 插入图片块 doc_id={doc_id}, image_key={image_key}, url={url}")
+        try:
+            resp = httpx.post(url, headers=headers, json=payload, verify=True, timeout=30.0)
+            if resp.status_code != 200:
+                return {"code": -1, "msg": f"HTTP {resp.status_code}: {resp.text[:100]}"}
+            return resp.json()
+        except Exception as e:
+            return {"code": -1, "msg": str(e)}
 
     def _add_doc_block(self, doc_id: str, text: str, block_type: int = 2) -> dict:
         """写入文档段落块"""
@@ -473,13 +710,13 @@ class Agent:
         }
         # heading 块结构与 paragraph 不同，需要单独处理
         if block_type == 3:
-            payload = {"children": [{"block_type": 3, "heading1": {"elements": [{"text_run": {"content": text}}], "style": {"align": 1}}}]}
+            payload = {"children": [{"block_type": 3, "heading1": {"elements": [{"text_run": {"content": text}}]}}]}
         elif block_type == 4:
-            payload = {"children": [{"block_type": 4, "heading2": {"elements": [{"text_run": {"content": text}}], "style": {"align": 1}}}]}
+            payload = {"children": [{"block_type": 4, "heading2": {"elements": [{"text_run": {"content": text}}]}}]}
         elif block_type == 5:
-            payload = {"children": [{"block_type": 5, "heading3": {"elements": [{"text_run": {"content": text}}], "style": {"align": 1}}}]}
+            payload = {"children": [{"block_type": 5, "heading3": {"elements": [{"text_run": {"content": text}}]}}]}
         else:
-            payload = {"children": [{"block_type": block_type, "text": {"elements": [{"text_run": {"content": text, "text_element_style": {"bold": False, "inline_code": False, "italic": False, "strikethrough": False, "underline": False}}}], "style": {"align": 1, "folded": False}}}]}
+            payload = {"children": [{"block_type": 2, "text": {"elements": [{"text_run": {"content": text}}], "style": {"align": 1}}}]}
         try:
             resp = httpx.post(url, headers=headers, json=payload, verify=True, timeout=30.0)
             if resp.status_code != 200:
@@ -517,12 +754,14 @@ class Agent:
             doc_link = f"https://feishu.cn/docx/{doc_id}"
             print(f"[DOC] 文档已创建: doc_id={doc_id}")
 
-            # 2. 开放文档编辑权限给所有参与讨论的人
+            # 2. 开放文档编辑权限给所有参与讨论的人（包括 bot 自身）
             try:
                 perm_url = f"https://open.feishu.cn/open-apis/drive/v1/permissions/{doc_id}/members?type=docx"
                 headers = {"Authorization": f"Bearer {self._get_token()}", "Content-Type": "application/json"}
-                # 给所有群成员加编辑权限
+                # 获取 bot 自身的 open_id
+                bot_id = self._get_bot_id()
                 member_ids = [
+                    bot_id,  # bot 自身
                     "ou_9f07561e326f93aa980c784bfdda6e29",  # PM
                 ]
                 for mid in member_ids:
@@ -543,10 +782,45 @@ class Agent:
 
             if content:
                 lines = content.split("\n")
+                image_files = self.context.get("image_files", {})
                 for line in lines:
                     line = line.strip()
                     if not line:
                         continue
+
+                    # 处理图片标记
+                    import re
+                    keep_match = re.match(r"\[保留图片:\s*(.+?)\]", line)
+                    summary_match = re.match(r"\[图片总结:\s*(.+?)\]", line)
+                    file_match = re.match(r"\[保留文件:\s*(.+?)\]", line)
+                    if file_match:
+                        # [保留文件:] 是 LLM 误用的标记，内容已通过 [Excel内容:] 等嵌入，跳过
+                        continue
+                    if keep_match:
+                        fname = keep_match.group(1).strip()
+                        print(f"[DEBUG] 发现 [保留图片:] fname={fname}, image_files keys={list(image_files.keys())}")
+                        if fname in image_files:
+                            local_path = image_files[fname]
+                            self._cached_token = None  # 强制刷新 token
+                            image_key = self._upload_image_to_doc(local_path, doc_id)
+                            if image_key:
+                                self._cached_token = None  # 强制刷新 token
+                                result = self._add_doc_image_block(doc_id, image_key)
+                                if result.get("code") == 0:
+                                    print(f"[DOC] 插入图片成功: {fname}")
+                                else:
+                                    print(f"[DOC] 插入图片失败（OCR已有文字描述，跳过）: {result}")
+                            else:
+                                print(f"[DOC] 上传图片失败，跳过（OCR已有文字描述）")
+                        continue
+                    if summary_match:
+                        # 图片总结写成一行文字
+                        summary_text = summary_match.group(1).strip()
+                        result = self._add_doc_block(doc_id, f"（图片：{summary_text}）", block_type=2)
+                        if result.get("code") == 0:
+                            print(f"[DOC] 写入图片总结: {summary_text[:30]}")
+                        continue
+
                     # 识别标题标记 [H1]/[H2]/[H3]
                     block_type = 2  # 默认普通段落
                     if line.startswith("[H1]"):
@@ -561,7 +835,7 @@ class Agent:
                     # 去掉残留的列表标记
                     if line.startswith("- "):
                         line = line[2:]
-                    elif line[1:].startswith(". ") and line[0].isdigit():
+                    elif len(line) > 1 and line[0].isdigit() and line[1:].startswith(". "):
                         line = line[line.find(". ")+2:]
                     result = self._add_doc_block(doc_id, line, block_type=block_type)
                     if result.get("code") != 0:
@@ -593,12 +867,19 @@ class Agent:
 
     def _do_report(self, task: Task) -> str:
         """向群聊发送文字汇报"""
-        # 优先使用跨步骤上下文中的文档链接
-        if self.context.get("doc_link"):
-            content = f"{self.context.get('doc_title', '文档')}已生成，请查收：{self.context['doc_link']}"
+        import re
+        # 优先用 context 里的文档链接（DOC 步骤写入的）
+        doc_link = self.context.get("doc_link", "")
+        if doc_link:
+            content = f"{self.context.get('doc_title', '文档')}已生成，请查收：{doc_link}"
         else:
-            content = task.params.get("content", "任务已完成")
-        print(f"[REPORT] 准备发送汇报到 chat_id={self.chat_id}, content={content}")
+            # 没有文档时，用 LLM 生成的研究总结（research_result）
+            summary = self.context.get("research_result", "")
+            if summary:
+                # 去掉<think>...</think>标签
+                summary = re.sub(r"<think>[\s\S]*?</think>", "", summary).strip()
+            content = summary or "任务已完成"
+        print(f"[REPORT] 准备发送汇报到 chat_id={self.chat_id}, content={content[:100] if content else 'empty'}")
         try:
             request = (
                 CreateMessageRequest.builder()
